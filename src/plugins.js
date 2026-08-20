@@ -110,6 +110,9 @@ export class PluginManager {
       router: client.router,
       options: entry.options,
       logger: client.logger || console,
+      cache: client.cache,
+      events: client,
+      emit: (...args) => client.emit(...args),
       on(event, listener) {
         client.on(event, listener);
         return () => client.off(event, listener);

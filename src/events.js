@@ -60,4 +60,45 @@ export class EventEmitter {
   }
 
   listenerCount(event) { return this.listeners.get(event)?.size ?? 0; }
+
+  eventNames() { return [...this.listeners.keys()]; }
+
+  listenersFor(event) { return [...(this.listeners.get(event) || [])]; }
+
+  /** Wait for an event, optionally filtering it or cancelling it. */
+  waitFor(event, { timeout = 0, signal, filter } = {}) {
+    return new Promise((resolve, reject) => {
+      let timer;
+      const cleanup = () => {
+        this.off(event, listener);
+        if (timer) clearTimeout(timer);
+        signal?.removeEventListener?.('abort', onAbort);
+      };
+      const onAbort = () => { cleanup(); reject(signal.reason || new Error('The operation was aborted')); };
+      const listener = (...args) => {
+        try {
+          if (filter && !filter(...args)) return;
+          cleanup();
+          resolve(args.length > 1 ? args : args[0]);
+        } catch (error) {
+          cleanup();
+          reject(error);
+        }
+      };
+      this.on(event, listener);
+      if (signal?.aborted) return onAbort();
+      signal?.addEventListener?.('abort', onAbort, { once: true });
+      if (timeout > 0) timer = setTimeout(() => {
+        cleanup();
+        reject(new Error(`Timed out waiting for event ${String(event)}`));
+      }, timeout);
+    });
+  }
+
+  async emitAsync(event, ...args) {
+    const set = this.listeners.get(event);
+    if (!set?.size) return false;
+    for (const listener of [...set]) await listener(...args);
+    return true;
+  }
 }

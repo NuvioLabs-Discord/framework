@@ -11,6 +11,7 @@ export class InteractionContext {
     Object.assign(this, data);
     this.acknowledged = false;
     this.receivedAt = Date.now();
+    this.expiresAt = this.receivedAt + 15 * 60 * 1000;
   }
 
   get isCommand() { return this.type === 2; }
@@ -27,8 +28,11 @@ export class InteractionContext {
   get subcommandName() { return this.options.find(option => option.type === 1)?.name; }
   get subcommandGroupName() { return this.options.find(option => option.type === 2)?.name; }
   get isAcknowledged() { return this.acknowledged; }
+  get isExpired() { return Date.now() >= this.expiresAt; }
+  get permissions() { return this.memberPermissions ? BigInt(this.memberPermissions) : 0n; }
 
   _callback(payload) {
+    if (this.isExpired) throw new Error('This interaction token has expired');
     this.acknowledged = true;
     return this.client.rest.post(`/interactions/${this.id}/${this.token}/callback`, payload);
   }
@@ -39,6 +43,7 @@ export class InteractionContext {
     return this._callback({ type: 4, data: messagePayload(payload) });
   }
   async defer(ephemeral = false) { return this.reply(response.defer(ephemeral)); }
+  async respond(payload) { return this.reply(payload); }
   async deferUpdate() { return this.reply(response.deferUpdate()); }
   async update(payload, options = {}) { return this.reply(response.update(messagePayload(payload), options)); }
   async showModal(customId, title, components) { return this.reply(response.modal(customId, title, components)); }
@@ -70,6 +75,20 @@ export class InteractionContext {
     const value = search(this.options);
     return value === undefined ? fallback : value;
   }
+
+  optionsObject(options = this.options) {
+    return Object.fromEntries(options.map(item => [item.name, item.options ? this.optionsObject(item.options) : item.value]));
+  }
+
+  getString(name, fallback) { return this.option(name, fallback); }
+  getInteger(name, fallback) { return this.option(name, fallback); }
+  getNumber(name, fallback) { return this.option(name, fallback); }
+  getBoolean(name, fallback) { return this.option(name, fallback); }
+  getUser(name, fallback) { return this.option(name, fallback); }
+  getRole(name, fallback) { return this.option(name, fallback); }
+  getChannel(name, fallback) { return this.option(name, fallback); }
+  getMentionable(name, fallback) { return this.option(name, fallback); }
+  getAttachment(name, fallback) { return this.option(name, fallback); }
 }
 
 export class InteractionRouter extends EventEmitter {
@@ -92,6 +111,7 @@ export class InteractionRouter extends EventEmitter {
   removeCommand(name) { return this.commands.delete(name); }
   component(pattern, handler) { this.components.push({ pattern, handler }); return this; }
   modal(pattern, handler) { this.modals.push({ pattern, handler }); return this; }
+  guard(pattern, handler) { return this.component(pattern, handler); }
   onAutocomplete(name, handler) { this.autocomplete.set(name, handler); return this; }
 
   async handle(data) {
@@ -126,7 +146,8 @@ export class InteractionRouter extends EventEmitter {
   async _match(handlers, value, context) {
     for (const item of handlers) {
       let matched;
-      if (typeof item.pattern === 'string') matched = item.pattern === value;
+      if (Array.isArray(item.pattern)) matched = item.pattern.includes(value);
+      else if (typeof item.pattern === 'string') matched = item.pattern === value;
       else if (item.pattern instanceof RegExp) { item.pattern.lastIndex = 0; matched = item.pattern.test(value); }
       else if (typeof item.pattern === 'function') matched = await item.pattern(value, context);
       if (matched) { await this._run(item.handler, context, value); return; }

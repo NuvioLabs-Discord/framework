@@ -124,6 +124,15 @@ export class WebSocket extends EventEmitter {
     if (!this.connected || this.closed) throw new Error('WebSocket is not open');
     const payload = Buffer.isBuffer(data) ? data : Buffer.from(String(data));
     this._sendFrame(0x1, payload);
+    return this;
+  }
+
+  ping(data = '') {
+    if (!this.connected || this.closed) throw new Error('WebSocket is not open');
+    const payload = Buffer.isBuffer(data) ? data : Buffer.from(String(data));
+    if (payload.length > 125) throw new RangeError('WebSocket ping payload cannot exceed 125 bytes');
+    this._sendFrame(0x9, payload);
+    return this;
   }
 
   _sendFrame(opcode, payload) {

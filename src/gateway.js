@@ -14,7 +14,7 @@ const INVALID_SESSION_CLOSES = new Set([4007, 4009]);
 
 /** Maintains a Discord Gateway session and exposes raw dispatch events. */
 export class Gateway extends EventEmitter {
-  constructor({ token, intents = 0, properties = {}, gatewayUrl = 'wss://gateway.discord.gg/?v=10&encoding=json', maxReconnectAttempts = Infinity, reconnectJitter = 250 } = {}) {
+  constructor({ token, intents = 0, properties = {}, gatewayUrl = 'wss://gateway.discord.gg/?v=10&encoding=json', maxReconnectAttempts = Infinity, reconnectJitter = 250, heartbeatJitter = 0, logger } = {}) {
     super();
     if (!token) throw new TypeError('A bot token is required');
     this.token = token;
@@ -23,13 +23,21 @@ export class Gateway extends EventEmitter {
     this.gatewayUrl = gatewayUrl;
     this.maxReconnectAttempts = maxReconnectAttempts;
     this.reconnectJitter = reconnectJitter;
+    this.heartbeatJitter = heartbeatJitter;
+    this.logger = logger;
     this.sequence = null;
     this.sessionId = null;
     this.resumeUrl = null;
     this.reconnectAttempts = 0;
     this.stopping = false;
     this.heartbeatAcked = true;
+    this.latency = null;
+    this.lastHeartbeatAt = null;
+    this.lastHeartbeatAckAt = null;
   }
+
+  get isConnected() { return Boolean(this.ws?.connected); }
+  get isResuming() { return Boolean(this.sessionId && this.resumeUrl); }
 
   async connect() {
     this.stopping = false;
@@ -50,6 +58,7 @@ export class Gateway extends EventEmitter {
   _message(message) {
     let packet;
     try { packet = JSON.parse(message); } catch (error) { return this.emit('error', new GatewayError('Invalid Gateway JSON', { cause: error })); }
+    this.emit('raw', packet);
     if (packet.s !== null && packet.s !== undefined) this.sequence = packet.s;
     if (packet.op === GatewayOpcode.HELLO) {
       this.heartbeatInterval = packet.d?.heartbeat_interval;
@@ -60,11 +69,14 @@ export class Gateway extends EventEmitter {
     } else if (packet.op === GatewayOpcode.HEARTBEAT) this._heartbeat();
     else if (packet.op === GatewayOpcode.HEARTBEAT_ACK) {
       this.heartbeatAcked = true;
-      this.emit('heartbeat', { acknowledged: true, latency: this.lastHeartbeat ? Date.now() - this.lastHeartbeat : undefined });
+      this.lastHeartbeatAckAt = Date.now();
+      this.latency = this.lastHeartbeatAt ? this.lastHeartbeatAckAt - this.lastHeartbeatAt : undefined;
+      this.emit('heartbeat', { acknowledged: true, latency: this.latency });
     } else if (packet.op === GatewayOpcode.RECONNECT) this._reconnect();
     else if (packet.op === GatewayOpcode.INVALID_SESSION) {
-      this.sessionId = null; this.resumeUrl = null; this.sequence = null;
-      setTimeout(() => this._reconnect(), packet.d ? 0 : 5000).unref?.();
+      if (!packet.d) { this.sessionId = null; this.resumeUrl = null; this.sequence = null; }
+      const timer = setTimeout(() => this._reconnect(), packet.d ? 0 : 5000);
+      timer.unref?.();
     } else if (packet.op === GatewayOpcode.DISPATCH) this._dispatch(packet.t, packet.d);
   }
 
@@ -90,21 +102,30 @@ export class Gateway extends EventEmitter {
       return;
     }
     this.heartbeatAcked = false;
-    this.lastHeartbeat = Date.now();
+    this.lastHeartbeatAt = Date.now();
     this._send(GatewayOpcode.HEARTBEAT, this.sequence);
   }
   _startHeartbeat() {
     clearInterval(this.heartbeatTimer);
+    clearTimeout(this.heartbeatStartTimer);
     this.heartbeatAcked = true;
-    this._heartbeat();
-    this.heartbeatTimer = setInterval(() => this._heartbeat(), this.heartbeatInterval);
-    this.heartbeatTimer.unref?.();
+    const begin = () => {
+      this._heartbeat();
+      this.heartbeatTimer = setInterval(() => this._heartbeat(), this.heartbeatInterval);
+      this.heartbeatTimer.unref?.();
+    };
+    const delay = this.heartbeatJitter ? Math.floor(Math.random() * this.heartbeatJitter) : 0;
+    if (delay) {
+      this.heartbeatStartTimer = setTimeout(begin, delay);
+      this.heartbeatStartTimer.unref?.();
+    } else begin();
   }
 
   async _reconnect() { this.ws?.close(1000, 'reconnect'); }
 
   async _closed({ code = 1006 } = {}) {
     clearInterval(this.heartbeatTimer);
+    clearTimeout(this.heartbeatStartTimer);
     if (this.stopping) return;
     this.emit('disconnected', code);
     if (INVALID_SESSION_CLOSES.has(code)) {
@@ -118,13 +139,14 @@ export class Gateway extends EventEmitter {
     this._open();
   }
 
-  identifyPresence(presence) { this._send(GatewayOpcode.PRESENCE_UPDATE, presence); }
+  identifyPresence(presence) { this._send(GatewayOpcode.PRESENCE_UPDATE, presence); return this; }
   requestGuildMembers(data) { this._send(GatewayOpcode.REQUEST_GUILD_MEMBERS, data); return this; }
   updateVoiceState(data) { this._send(GatewayOpcode.VOICE_STATE_UPDATE, data); return this; }
 
   disconnect(code = 1000, reason = 'shutdown') {
     this.stopping = true;
     clearInterval(this.heartbeatTimer);
+    clearTimeout(this.heartbeatStartTimer);
     this.ws?.close(code, reason);
   }
 }

@@ -15,7 +15,7 @@ import { UpdateManager } from './updater.js';
  * await client.login(process.env.DISCORD_TOKEN);
  */
 export class Client extends EventEmitter {
-  constructor({ token, intents = 0, apiBase, gatewayUrl, applicationId, autoSyncCommands = false, properties, logger, cache = true, cacheSize = 1_000, updates = false } = {}) {
+  constructor({ token, intents = 0, apiBase, gatewayUrl, applicationId, autoSyncCommands = false, properties, logger, cache = true, cacheSize = 1_000, updates = false, rest: restOptions = {}, gateway: gatewayOptions = {}, presence } = {}) {
     super();
     this.token = token;
     this.intents = intents;
@@ -24,6 +24,9 @@ export class Client extends EventEmitter {
     this.applicationId = applicationId;
     this.autoSyncCommands = autoSyncCommands;
     this.properties = properties;
+    this.presence = presence;
+    this.restOptions = restOptions;
+    this.gatewayOptions = gatewayOptions;
     this.logger = logger || console;
     const updateOptions = updates === true ? {} : updates && typeof updates === 'object' && updates.enabled !== false ? { ...updates } : null;
     if (updateOptions) delete updateOptions.enabled;
@@ -37,6 +40,9 @@ export class Client extends EventEmitter {
       users: new Cache({ maxSize: cache?.users?.maxSize ?? cacheSize, ttl: cache?.users?.ttl ?? 0 }),
     };
     this.readyState = false;
+    this.startedAt = null;
+    this.readyAt = null;
+    this._cacheSweepTimer = null;
     this.router.on('error', (error, context) => this.emit('error', error, context));
     this.router.on('interaction', context => this.emit('interaction', context));
   }
@@ -60,18 +66,26 @@ export class Client extends EventEmitter {
   unuse(name) { return this.plugins.unuse(name); }
 
   get isReady() { return this.readyState; }
+  get uptime() { return this.startedAt ? Date.now() - this.startedAt : 0; }
+  get latency() { return this.gateway?.latency ?? null; }
+
+  health() {
+    return { ready: this.readyState, connected: Boolean(this.gateway?.isConnected), uptime: this.uptime,
+      latency: this.latency, userId: this.user?.id, guilds: this.cache?.guilds.size ?? 0 };
+  }
 
   async login(token = this.token) {
     if (this.readyState) return this.user;
     if (!token) throw new TypeError('A Discord bot token is required');
     this.token = token;
-    this.rest = new RestClient({ token, apiBase: this.apiBase });
+    this.startedAt ||= Date.now();
+    this.rest = new RestClient({ token, apiBase: this.apiBase, logger: this.logger, ...this.restOptions });
     const user = await this.rest.get('/users/@me');
     this.user = user;
     this.applicationId ||= user.id;
     let gatewayUrl = this.gatewayUrl;
     if (!gatewayUrl) gatewayUrl = (await this.rest.get('/gateway/bot')).url;
-    this.gateway = new Gateway({ token, intents: this.intents, gatewayUrl, properties: this.properties });
+    this.gateway = new Gateway({ token, intents: this.intents, gatewayUrl, properties: this.properties, logger: this.logger, ...this.gatewayOptions });
     this._wireGateway();
     await this.plugins.initialize();
     const readyData = await new Promise((resolve, reject) => {
@@ -83,6 +97,9 @@ export class Client extends EventEmitter {
       this.gateway.connect().catch(onError);
     });
     this.readyState = true;
+    this.readyAt = Date.now();
+    this._startCacheSweep();
+    if (this.presence) this.setPresence(this.presence);
     await this.plugins.ready(readyData);
     if (this.autoSyncCommands) await this.syncCommands();
     this.updates?.start();
@@ -120,37 +137,77 @@ export class Client extends EventEmitter {
     else if (type === 'USER_UPDATE' && data.id) this.cache.users.set(data.id, data);
   }
 
-  async syncCommands(guildId) {
+  async syncCommands(guildId, { dryRun = false } = {}) {
     if (!this.applicationId) throw new Error('applicationId is not known yet');
+    if (!this.rest) throw new Error('Client is not logged in');
     const body = [...this.commands.values()].map(command => command.data);
     const path = guildId ? `/applications/${this.applicationId}/guilds/${guildId}/commands` : `/applications/${this.applicationId}/commands`;
-    return this.rest.put(path, body);
+    return dryRun ? body : this.rest.put(path, body);
+  }
+
+  async fetchUser(userId) {
+    if (!this.rest) throw new Error('Client is not logged in');
+    const user = await this.rest.get(`/users/${userId}`);
+    this.cache?.users.set(user.id, user);
+    return user;
+  }
+
+  async fetchGuild(guildId) {
+    if (!this.rest) throw new Error('Client is not logged in');
+    const guild = await this.rest.get(`/guilds/${guildId}`);
+    this.cache?.guilds.set(guild.id, guild);
+    return guild;
+  }
+
+  async fetchChannel(channelId) {
+    if (!this.rest) throw new Error('Client is not logged in');
+    const channel = await this.rest.get(`/channels/${channelId}`);
+    this.cache?.channels.set(channel.id, channel);
+    return channel;
   }
 
   async fetchApplicationCommands(guildId) {
     if (!this.applicationId) throw new Error('applicationId is not known yet');
+    if (!this.rest) throw new Error('Client is not logged in');
     const path = guildId ? `/applications/${this.applicationId}/guilds/${guildId}/commands` : `/applications/${this.applicationId}/commands`;
     return this.rest.get(path);
   }
 
   /** Send a raw Gateway presence update. */
-  setPresence(presence) { this.gateway?.identifyPresence(presence); return this; }
+  setPresence(presence) { this.presence = presence; this.gateway?.identifyPresence(presence); return this; }
+
+  _startCacheSweep() {
+    clearInterval(this._cacheSweepTimer);
+    if (!this.cache) return;
+    const hasTtl = Object.values(this.cache).some(value => value.ttl > 0);
+    if (!hasTtl) return;
+    this._cacheSweepTimer = setInterval(() => Object.values(this.cache).forEach(value => value.sweep()), 60_000);
+    this._cacheSweepTimer.unref?.();
+  }
+
   disconnect() {
     this.readyState = false;
     this.updates?.stop();
+    clearInterval(this._cacheSweepTimer);
+    this._cacheSweepTimer = null;
     this.plugins.shutdown().catch(error => this.emit('error', error));
     this.gateway?.disconnect();
     return this;
   }
   async shutdown() {
     this.readyState = false;
+    this.readyAt = null;
     this.updates?.stop();
+    clearInterval(this._cacheSweepTimer);
+    this._cacheSweepTimer = null;
     await this.plugins.shutdown();
     this.gateway?.disconnect();
     this.cache?.guilds.clear();
     this.cache?.channels.clear();
     this.cache?.users.clear();
   }
+
+  destroy() { return this.shutdown(); }
 }
 
 export const Intents = Object.freeze({

@@ -2,6 +2,8 @@ import https from 'node:https';
 import { DiscordHttpError } from './errors.js';
 import { normalizeBody, routeKey, sleep } from './util.js';
 
+const VERSION = '0.2.0';
+
 const API = 'https://discord.com/api/v10';
 
 /**
@@ -9,12 +11,17 @@ const API = 'https://discord.com/api/v10';
  * bucket and automatically wait on global and route rate limits.
  */
 export class RestClient {
-  constructor({ token, apiBase = API, userAgent = 'nuvio-labs/0.1.0', timeout = 30_000 } = {}) {
+  constructor({ token, apiBase = API, userAgent = `nuvio-labs/${VERSION}`, timeout = 30_000, retries = 3, retryOn = [429, 500, 502, 503, 504], retryDelay = 250, logger } = {}) {
     if (!token) throw new TypeError('A bot token is required');
     this.token = token;
     this.apiBase = apiBase.replace(/\/$/, '');
     this.userAgent = userAgent;
     this.timeout = timeout;
+    this.retries = retries;
+    this.retryOn = new Set(retryOn);
+    this.retryDelay = retryDelay;
+    this.logger = logger;
+    this.stats = { requests: 0, successes: 0, failures: 0, retries: 0, rateLimited: 0 };
     /** @type {Map<string, Promise<any>>} */
     this.queues = new Map();
     /** @type {Map<string, {bucketId?: string, resetAt?: number, remaining?: number}>} */
@@ -29,7 +36,7 @@ export class RestClient {
   patch(path, body, options = {}) { return this.request('PATCH', path, { ...options, body }); }
   delete(path, options) { return this.request('DELETE', path, options); }
 
-  request(method, path, { body, query, headers = {}, retries = 3, signal, timeout = this.timeout } = {}) {
+  request(method, path, { body, query, headers = {}, retries = this.retries, retryOn = this.retryOn, retryDelay = this.retryDelay, signal, timeout = this.timeout } = {}) {
     const url = new URL(path, `${this.apiBase}/`);
     if (query) for (const [key, value] of Object.entries(query)) {
       if (value === undefined || value === null) continue;
@@ -40,7 +47,7 @@ export class RestClient {
     const bucketId = this.routes.get(route)?.bucketId;
     const queueKeys = [route, ...(bucketId ? [`bucket:${bucketId}`] : [])];
     const previous = Promise.all(queueKeys.map(key => this.queues.get(key) || Promise.resolve()));
-    const job = previous.then(() => this._request(method, url, body, headers, retries, signal, timeout, route));
+    const job = previous.then(() => this._request(method, url, body, headers, retries, retryOn, retryDelay, signal, timeout, route));
     const queued = job.finally(() => {
       for (const key of queueKeys) if (this.queues.get(key) === queued) this.queues.delete(key);
     });
@@ -48,31 +55,59 @@ export class RestClient {
     return job;
   }
 
-  async _request(method, url, body, headers, retries, signal, timeout, route) {
+  async _request(method, url, body, headers, retries, retryOn, retryDelay, signal, timeout, route) {
+    this.stats.requests++;
     await this.globalWait;
     const state = this.routes.get(route);
     const bucket = state?.bucketId ? this.buckets.get(state.bucketId) : state;
     if (bucket?.resetAt > Date.now()) await sleep(bucket.resetAt - Date.now(), signal);
     const serialized = normalizeBody(body);
-    const result = await this._raw(method, url, serialized, headers, signal, timeout);
+    let result;
+    try {
+      result = await this._raw(method, url, serialized, headers, signal, timeout);
+    } catch (error) {
+      if (retries > 0 && !signal?.aborted) {
+        const wait = Math.min(30_000, retryDelay * 2 ** (this.retries - retries));
+        this.stats.retries++;
+        this.logger?.warn?.(`Retrying ${method} ${url.pathname} after network error: ${error.message}`);
+        await sleep(wait, signal);
+        return this._request(method, url, body, headers, retries - 1, retryOn, retryDelay, signal, timeout, route);
+      }
+      this.stats.failures++;
+      throw error;
+    }
     this._updateBucket(route, result.headers);
-    if (result.status === 429) {
-      const wait = Math.max(0, Number(result.json?.retry_after ?? result.headers['retry-after'] ?? 1) * 1000);
+    if (result.status === 429) this.stats.rateLimited++;
+    if (retryOn.has?.(result.status) || retryOn?.includes?.(result.status)) {
+      const retryAfter = result.json?.retry_after ?? result.headers['retry-after'];
+      const wait = result.status === 429 && retryAfter !== undefined
+        ? Math.max(0, Number(retryAfter) * 1000)
+        : Math.min(30_000, retryDelay * 2 ** (this.retries - retries));
       if (result.json?.global) {
         this.globalWait = sleep(wait).finally(() => { this.globalWait = Promise.resolve(); });
       }
       if (retries > 0) {
+        this.stats.retries++;
+        this.logger?.warn?.(`Retrying ${method} ${url.pathname} after ${wait}ms (HTTP ${result.status})`);
         await sleep(wait, signal);
-        return this._request(method, url, body, headers, retries - 1, signal, timeout, route);
+        return this._request(method, url, body, headers, retries - 1, retryOn, retryDelay, signal, timeout, route);
       }
     }
     if (result.status < 200 || result.status >= 300) {
+      this.stats.failures++;
       throw new DiscordHttpError(`Discord REST request failed: ${method} ${url.pathname} (${result.status})`, {
         status: result.status, method, path: url.pathname, body: result.json ?? result.text, details: result.json,
         retryAfter: result.status === 429 ? Number(result.json?.retry_after ?? result.headers['retry-after']) : undefined,
       });
     }
+    this.stats.successes++;
     return (result.json ?? result.text) || null;
+  }
+
+  getRateLimitState(path, method = 'GET') {
+    const route = routeKey(method, new URL(path, `${this.apiBase}/`).pathname);
+    const state = this.routes.get(route);
+    return state ? { ...state, bucket: state.bucketId ? { ...this.buckets.get(state.bucketId) } : undefined } : null;
   }
 
   _updateBucket(route, headers) {
