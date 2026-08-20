@@ -5,6 +5,7 @@ import { InteractionRouter } from './interactions.js';
 import { PluginManager } from './plugins.js';
 import { Cache } from './cache.js';
 import { UpdateManager } from './updater.js';
+import { command } from './builders.js';
 import { CommandStore, PreconditionStore, TaskScheduler, ListenerStore } from './framework.js';
 
 /**
@@ -16,7 +17,7 @@ import { CommandStore, PreconditionStore, TaskScheduler, ListenerStore } from '.
  * await client.login(process.env.DISCORD_TOKEN);
  */
 export class Client extends EventEmitter {
-  constructor({ token, intents = 0, apiBase, gatewayUrl, applicationId, autoSyncCommands = false, properties, logger, cache = true, cacheSize = 1_000, updates = false, rest: restOptions = {}, gateway: gatewayOptions = {}, presence } = {}) {
+  constructor({ token, intents = 0, apiBase, gatewayUrl, applicationId, autoSyncCommands = false, properties, logger, cache = true, cacheSize = 1_000, updates = false, rest: restOptions = {}, gateway: gatewayOptions = {}, presence, builtInCommands = true, sharding = false } = {}) {
     super();
     this.token = token;
     this.intents = intents;
@@ -26,6 +27,12 @@ export class Client extends EventEmitter {
     this.autoSyncCommands = autoSyncCommands;
     this.properties = properties;
     this.presence = presence;
+    this.builtInCommands = builtInCommands !== false;
+    const shardConfig = sharding === true ? {} : sharding && typeof sharding === 'object' ? sharding : null;
+    this.sharding = { enabled: Boolean(shardConfig) && shardConfig.enabled !== false, id: shardConfig?.id ?? 0, total: shardConfig?.total ?? null };
+    if (this.sharding.id < 0 || (this.sharding.total !== null && this.sharding.total < 1) || (this.sharding.total !== null && this.sharding.id >= this.sharding.total)) {
+      throw new RangeError('sharding.id must be non-negative and less than sharding.total');
+    }
     this.restOptions = restOptions;
     this.gatewayOptions = gatewayOptions;
     this.logger = logger || console;
@@ -38,6 +45,7 @@ export class Client extends EventEmitter {
     this.tasks = new TaskScheduler(this);
     this.listenerStore = new ListenerStore(this);
     this.router = new InteractionRouter(this);
+    this._builtInCommandNames = new Set();
     this.plugins = new PluginManager(this);
     this.cache = cache === false ? null : {
       guilds: new Cache({ maxSize: cache?.guilds?.maxSize ?? cacheSize, ttl: cache?.guilds?.ttl ?? 0 }),
@@ -48,19 +56,26 @@ export class Client extends EventEmitter {
     this.startedAt = null;
     this.readyAt = null;
     this._cacheSweepTimer = null;
+    this._registerBuiltInCommands();
     this.router.on('error', (error, context) => this.emit('error', error, context));
     this.router.on('interaction', context => this.emit('interaction', context));
   }
 
   /** Register a command and its handler. */
   command(definition, handler, options = {}) {
+    const data = definition?.toJSON ? definition.toJSON() : definition;
+    if (data?.name && this._builtInCommandNames.has(data.name)) {
+      this.commands.delete(data.name);
+      this.router.removeCommand(data.name);
+      this._builtInCommandNames.delete(data.name);
+    }
     const entry = this.commands.register(definition, handler, options);
     this.router.command(entry.name, handler, entry);
     return this;
   }
 
-  removeCommand(name) { this.commands.delete(name); this.router.removeCommand(name); return this; }
-  clearCommands() { for (const name of this.commands.keys()) this.router.removeCommand(name); this.commands.clear(); return this; }
+  removeCommand(name) { this.commands.delete(name); this.router.removeCommand(name); this._builtInCommandNames.delete(name); return this; }
+  clearCommands() { for (const name of this.commands.keys()) this.router.removeCommand(name); this.commands.clear(); this._builtInCommandNames.clear(); return this; }
   component(pattern, handler) { this.router.component(pattern, handler); return this; }
   modal(pattern, handler) { this.router.modal(pattern, handler); return this; }
   autocomplete(name, handler) { this.router.onAutocomplete(name, handler); return this; }
@@ -73,6 +88,31 @@ export class Client extends EventEmitter {
     return this;
   }
   commandList() { return this.commands.list(); }
+
+  _registerBuiltInCommands() {
+    if (!this.builtInCommands) return;
+    this.command(command('help', 'List the bot commands'), ctx => {
+      const lines = this.commandList().map(item => {
+        const aliases = item.aliases.length ? ` (aliases: ${item.aliases.map(alias => `/${alias}`).join(', ')})` : '';
+        return `/${item.name}${aliases} — ${item.data.description || 'No description'}`;
+      });
+      const content = ['**Available commands**', ...(lines.length ? lines : ['No commands registered.'])].join('\\n');
+      return ctx.reply({ content: content.length > 1_990 ? `${content.slice(0, 1_987)}...` : content, flags: 64 });
+    });
+    this._builtInCommandNames.add('help');
+    if (this.sharding.enabled) {
+      this.command(command('shards', 'Show shard connection information'), ctx => {
+        const info = this.shardInfo();
+        return ctx.reply({ content: `Shard ${info.id + 1}/${info.total}\\nStatus: ${info.connected ? 'connected' : 'disconnected'}\\nLatency: ${info.latency ?? 'pending'}ms`, flags: 64 });
+      });
+      this._builtInCommandNames.add('shards');
+    }
+  }
+
+  shardInfo() {
+    return { ...this.sharding, total: this.sharding.total ?? 1, connected: Boolean(this.gateway?.isConnected),
+      latency: this.latency, sessionId: this.gateway?.sessionId, reconnectAttempts: this.gateway?.reconnectAttempts ?? 0 };
+  }
   use(plugin, options = {}) { return this.plugins.use(plugin, options); }
   unuse(name) { return this.plugins.unuse(name); }
 
@@ -95,8 +135,14 @@ export class Client extends EventEmitter {
     this.user = user;
     this.applicationId ||= user.id;
     let gatewayUrl = this.gatewayUrl;
-    if (!gatewayUrl) gatewayUrl = (await this.rest.get('/gateway/bot')).url;
-    this.gateway = new Gateway({ token, intents: this.intents, gatewayUrl, properties: this.properties, logger: this.logger, ...this.gatewayOptions });
+    let gatewayInfo;
+    if (!gatewayUrl) {
+      gatewayInfo = await this.rest.get('/gateway/bot');
+      gatewayUrl = gatewayInfo.url;
+    }
+    if (this.sharding.enabled && this.sharding.total === null) this.sharding.total = gatewayInfo?.shards ?? 1;
+    this.gateway = new Gateway({ token, intents: this.intents, gatewayUrl, properties: this.properties, logger: this.logger,
+      shardId: this.sharding.id, shardCount: this.sharding.total ?? 1, ...this.gatewayOptions });
     this._wireGateway();
     await this.plugins.initialize();
     const readyData = await new Promise((resolve, reject) => {

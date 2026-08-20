@@ -14,7 +14,7 @@ const INVALID_SESSION_CLOSES = new Set([4007, 4009]);
 
 /** Maintains a Discord Gateway session and exposes raw dispatch events. */
 export class Gateway extends EventEmitter {
-  constructor({ token, intents = 0, properties = {}, gatewayUrl = 'wss://gateway.discord.gg/?v=10&encoding=json', maxReconnectAttempts = Infinity, reconnectJitter = 250, heartbeatJitter = 0, logger } = {}) {
+  constructor({ token, intents = 0, properties = {}, gatewayUrl = 'wss://gateway.discord.gg/?v=10&encoding=json', maxReconnectAttempts = Infinity, reconnectJitter = 250, heartbeatJitter = 0, logger, shardId = 0, shardCount = 1 } = {}) {
     super();
     if (!token) throw new TypeError('A bot token is required');
     this.token = token;
@@ -25,6 +25,11 @@ export class Gateway extends EventEmitter {
     this.reconnectJitter = reconnectJitter;
     this.heartbeatJitter = heartbeatJitter;
     this.logger = logger;
+    if (!Number.isInteger(shardId) || shardId < 0 || !Number.isInteger(shardCount) || shardCount < 1 || shardId >= shardCount) {
+      throw new RangeError('shardId must be non-negative and less than shardCount');
+    }
+    this.shardId = shardId;
+    this.shardCount = shardCount;
     this.sequence = null;
     this.sessionId = null;
     this.resumeUrl = null;
@@ -38,6 +43,7 @@ export class Gateway extends EventEmitter {
 
   get isConnected() { return Boolean(this.ws?.connected); }
   get isResuming() { return Boolean(this.sessionId && this.resumeUrl); }
+  get shard() { return { id: this.shardId, count: this.shardCount }; }
 
   async connect() {
     this.stopping = false;
@@ -65,7 +71,8 @@ export class Gateway extends EventEmitter {
       if (!this.heartbeatInterval) return this.emit('error', new GatewayError('Gateway HELLO did not include heartbeat_interval'));
       this._startHeartbeat();
       if (this.sessionId && this.resumeUrl) this._send(GatewayOpcode.RESUME, { token: this.token, session_id: this.sessionId, seq: this.sequence });
-      else this._send(GatewayOpcode.IDENTIFY, { token: this.token, intents: this.intents, properties: this.properties });
+      else this._send(GatewayOpcode.IDENTIFY, { token: this.token, intents: this.intents, properties: this.properties,
+        ...(this.shardCount > 1 ? { shard: [this.shardId, this.shardCount] } : {}) });
     } else if (packet.op === GatewayOpcode.HEARTBEAT) this._heartbeat();
     else if (packet.op === GatewayOpcode.HEARTBEAT_ACK) {
       this.heartbeatAcked = true;

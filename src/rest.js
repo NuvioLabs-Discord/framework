@@ -2,7 +2,7 @@ import https from 'node:https';
 import { DiscordHttpError } from './errors.js';
 import { normalizeBody, routeKey, sleep } from './util.js';
 
-const VERSION = '0.3.0';
+const VERSION = '0.4.0';
 
 const API = 'https://discord.com/api/v10';
 
