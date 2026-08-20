@@ -11,5 +11,15 @@
   "license": "Apache-2.0",
   "scripts": {
     "check": "node --check src/index.js && node --input-type=module -e \"import('./src/index.js')\""
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/NuvioLabs-Discord/framework.git"
+  },
+  "keywords": [],
+  "author": "",
+  "bugs": {
+    "url": "https://github.com/NuvioLabs-Discord/framework/issues"
+  },
+  "homepage": "https://github.com/NuvioLabs-Discord/framework#readme"
 }
