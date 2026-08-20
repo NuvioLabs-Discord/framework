@@ -17,6 +17,14 @@ export class GatewayError extends DiscordError {
   }
 }
 
+export class PreconditionError extends DiscordError {
+  constructor(message, options = {}) {
+    super(message, options);
+    this.name = 'PreconditionError';
+    this.response = options.response;
+  }
+}
+
 export class DiscordHttpError extends DiscordError {
   constructor(message, options = {}) {
     super(message, options);

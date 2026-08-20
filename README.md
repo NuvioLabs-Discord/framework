@@ -1,6 +1,6 @@
 # Nuvio Labs
 
-Nuvio Labs is a **zero-runtime-dependency Discord framework for Node.js**. Version `0.2.0` combines a resilient Gateway client, bucket-aware REST client, interaction router, fluent builders, plugins, bounded caches, observability helpers, and opt-in updates in one small package.
+Nuvio Labs is a **zero-runtime-dependency Discord framework for Node.js**. Version `0.3.0` adds a Sapphire-style application layer on top of the resilient Gateway client, bucket-aware REST client, interaction router, fluent builders, plugins, bounded caches, observability helpers, and opt-in updates.
 
 It uses only Node.js built-ins (`net`, `tls`, `https`, `crypto`, and filesystem/process APIs for the optional updater).
 
@@ -89,6 +89,66 @@ client.autocomplete('search', ctx => ctx.autocomplete([{ name: 'Nuvio', value: '
 `InteractionContext` provides `reply`, `defer`, `deferUpdate`, `update`, `showModal`, `autocomplete`, `editReply`, `fetchReply`, `deleteReply`, `followUp`, and follow-up editing/deletion. It also exposes `commandName`, `customId`, `guildId`, `channelId`, `actor`, `permissions`, `optionsObject()`, typed option getters, acknowledgement state, and token expiry state.
 
 Component helpers include `button`, `select`, `userSelect`, `roleSelect`, `mentionableSelect`, `channelSelect`, `textInput`, and `row`. `response` contains ready-to-send Discord callback payloads.
+
+## Sapphire-style application layer
+
+The framework now includes the building blocks normally found in a larger Discord application framework: a command store, aliases, named preconditions, typed argument parsing, scheduled tasks, and managed listeners.
+
+### Commands, aliases, and preconditions
+
+```js
+client.precondition(
+  'guildOnly',
+  ctx => Boolean(ctx.guildId),
+  () => 'This command can only be used inside a server.',
+);
+
+client.command(
+  command('profile', 'Show a member profile'),
+  ctx => ctx.reply(`Profile: ${ctx.arguments.member}`),
+  {
+    aliases: ['p'],
+    preconditions: ['guildOnly'],
+    args: [{ name: 'member', type: 'string' }],
+  },
+);
+
+console.log(client.commandList());
+console.log(client.commandStore.get('p')); // Resolves the profile alias
+```
+
+Commands registered with aliases are only synchronized to Discord under their primary name. Preconditions can be functions, registered names, or reusable definitions created with `definePrecondition()`.
+
+### Argument parsing
+
+```js
+import { parseArguments } from 'nuvio-labs';
+
+const args = parseArguments('production "cluster one" true', [
+  { name: 'environment' },
+  { name: 'target' },
+  { name: 'force', type: 'boolean' },
+]);
+```
+
+`ArgumentParser` supports quoted strings, integers, numbers, booleans, JSON values, custom converter functions, and nested Discord interaction options. Slash command values are available as `ctx.arguments` when argument definitions are supplied.
+
+### Tasks and listeners
+
+Tasks begin after the client becomes ready and stop during shutdown. They never overlap with themselves.
+
+```js
+client.task('refresh-config', 5 * 60_000, async client => {
+  await refreshConfig(client);
+}, { immediate: true });
+
+client.listen('ready', data => console.log('Ready:', data.user?.username), { name: 'startup-log' });
+
+console.log(client.tasks.list());
+await client.tasks.run('refresh-config');
+```
+
+Use `client.tasks.once()` for one-shot jobs, `client.tasks.remove()` to unregister a job, and `defineListener()` for reusable listener definitions. Plugins receive `command`, `precondition`, `task`, `listen`, `commands`, and `tasks` helpers in their setup context.
 
 ## Builders
 
@@ -209,8 +269,10 @@ Because installation and process replacement are powerful operations, enable thi
 - `Gateway`, `GatewayOpcode`, and the dependency-free `WebSocket`
 - `RestClient`, `DiscordError`, `DiscordHttpError`, and `GatewayError`
 - `InteractionContext` and `InteractionRouter`
+- `CommandStore`, `PreconditionStore`, `ArgumentParser`, `TaskScheduler`, and `ListenerStore`
 - `Cache`, `EventEmitter`, `PluginManager`, and `UpdateManager`
 - Command, embed, permission, response, and component builders
+- `definePrecondition`, `defineListener`, `parseArguments`, and `assertPreconditions`
 - Utility helpers including `sleep`, `withTimeout`, `clamp`, `pick`, and `routeKey`
 
 ## Development

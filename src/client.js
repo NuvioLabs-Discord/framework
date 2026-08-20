@@ -5,6 +5,7 @@ import { InteractionRouter } from './interactions.js';
 import { PluginManager } from './plugins.js';
 import { Cache } from './cache.js';
 import { UpdateManager } from './updater.js';
+import { CommandStore, PreconditionStore, TaskScheduler, ListenerStore } from './framework.js';
 
 /**
  * High-level Discord bot client.
@@ -31,7 +32,11 @@ export class Client extends EventEmitter {
     const updateOptions = updates === true ? {} : updates && typeof updates === 'object' && updates.enabled !== false ? { ...updates } : null;
     if (updateOptions) delete updateOptions.enabled;
     this.updates = updateOptions ? new UpdateManager(this, updateOptions) : null;
-    this.commands = new Map();
+    this.commands = new CommandStore();
+    this.commandStore = this.commands;
+    this.preconditions = new PreconditionStore();
+    this.tasks = new TaskScheduler(this);
+    this.listenerStore = new ListenerStore(this);
     this.router = new InteractionRouter(this);
     this.plugins = new PluginManager(this);
     this.cache = cache === false ? null : {
@@ -48,11 +53,9 @@ export class Client extends EventEmitter {
   }
 
   /** Register a command and its handler. */
-  command(definition, handler) {
-    const data = definition?.toJSON ? definition.toJSON() : definition;
-    if (!data?.name || typeof handler !== 'function') throw new TypeError('command(definition, handler) requires a named command and function');
-    this.commands.set(data.name, { data, handler });
-    this.router.command(data.name, handler);
+  command(definition, handler, options = {}) {
+    const entry = this.commands.register(definition, handler, options);
+    this.router.command(entry.name, handler, entry);
     return this;
   }
 
@@ -62,6 +65,14 @@ export class Client extends EventEmitter {
   modal(pattern, handler) { this.router.modal(pattern, handler); return this; }
   autocomplete(name, handler) { this.router.onAutocomplete(name, handler); return this; }
   middleware(handler) { this.router.use(handler); return this; }
+  precondition(name, check, onFailure) { this.preconditions.register(name, check, onFailure); return this; }
+  task(name, interval, handler, options = {}) { this.tasks.every(name, interval, handler, options); return this; }
+  listen(event, handler, options = {}) {
+    if (event && typeof event === 'object') return this.listen(event.event, event.handler, event);
+    this.listenerStore.register(event, handler, options);
+    return this;
+  }
+  commandList() { return this.commands.list(); }
   use(plugin, options = {}) { return this.plugins.use(plugin, options); }
   unuse(name) { return this.plugins.unuse(name); }
 
@@ -102,6 +113,7 @@ export class Client extends EventEmitter {
     if (this.presence) this.setPresence(this.presence);
     await this.plugins.ready(readyData);
     if (this.autoSyncCommands) await this.syncCommands();
+    this.tasks.start();
     this.updates?.start();
     return this.user;
   }
@@ -188,6 +200,7 @@ export class Client extends EventEmitter {
   disconnect() {
     this.readyState = false;
     this.updates?.stop();
+    this.tasks.stop();
     clearInterval(this._cacheSweepTimer);
     this._cacheSweepTimer = null;
     this.plugins.shutdown().catch(error => this.emit('error', error));
@@ -198,6 +211,7 @@ export class Client extends EventEmitter {
     this.readyState = false;
     this.readyAt = null;
     this.updates?.stop();
+    this.tasks.stop();
     clearInterval(this._cacheSweepTimer);
     this._cacheSweepTimer = null;
     await this.plugins.shutdown();

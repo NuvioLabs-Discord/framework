@@ -115,13 +115,53 @@ export class PluginManager {
       emit: (...args) => client.emit(...args),
       on(event, listener) {
         client.on(event, listener);
-        return () => client.off(event, listener);
+        const cleanup = () => client.off(event, listener);
+        entry.cleanups.push(cleanup);
+        return cleanup;
       },
-      command: (definition, handler) => client.command(definition, handler),
-      component: (pattern, handler) => client.component(pattern, handler),
-      modal: (pattern, handler) => client.modal(pattern, handler),
-      autocomplete: (name, handler) => client.autocomplete(name, handler),
-      middleware: handler => client.middleware(handler),
+      command(definition, handler, options) {
+        client.command(definition, handler, options);
+        const name = definition?.toJSON ? definition.toJSON().name : definition.name;
+        entry.cleanups.push(() => client.removeCommand(name));
+        return client;
+      },
+      precondition(name, check, onFailure) {
+        client.precondition(name, check, onFailure);
+        entry.cleanups.push(() => client.preconditions.delete(name));
+        return client;
+      },
+      task(name, interval, handler, options) {
+        client.task(name, interval, handler, options);
+        entry.cleanups.push(() => client.tasks.remove(name));
+        return client;
+      },
+      listen(event, listener, options) {
+        const cleanup = client.listenerStore.register(event, listener, options);
+        entry.cleanups.push(cleanup);
+        return client;
+      },
+      component(pattern, handler) {
+        client.component(pattern, handler);
+        entry.cleanups.push(() => client.router.removeComponent(pattern, handler));
+        return client;
+      },
+      modal(pattern, handler) {
+        client.modal(pattern, handler);
+        entry.cleanups.push(() => client.router.removeModal(pattern, handler));
+        return client;
+      },
+      autocomplete(name, handler) {
+        client.autocomplete(name, handler);
+        entry.cleanups.push(() => client.router.removeAutocomplete(name));
+        return client;
+      },
+      middleware(handler) {
+        client.middleware(handler);
+        entry.cleanups.push(() => client.router.removeMiddleware(handler));
+        return client;
+      },
+      commands: client.commandStore,
+      tasks: client.tasks,
       addCleanup(cleanup) {
         if (typeof cleanup !== 'function') throw new TypeError('addCleanup requires a function');
         entry.cleanups.push(cleanup);

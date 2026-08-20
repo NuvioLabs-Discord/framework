@@ -1,5 +1,7 @@
 import { EventEmitter } from './events.js';
 import { response } from './builders.js';
+import { ArgumentParser, assertPreconditions } from './framework.js';
+import { PreconditionError } from './errors.js';
 
 function messagePayload(payload) {
   return typeof payload === 'string' ? { content: payload } : (payload ?? {});
@@ -99,7 +101,9 @@ export class InteractionRouter extends EventEmitter {
     this.components = [];
     this.modals = [];
     this.autocomplete = new Map();
+    this.commandMeta = new Map();
     this.middlewares = [];
+    this.argumentParser = new ArgumentParser();
   }
 
   use(middleware) {
@@ -107,30 +111,55 @@ export class InteractionRouter extends EventEmitter {
     this.middlewares.push(middleware);
     return this;
   }
-  command(name, handler) { this.commands.set(name, handler); return this; }
-  removeCommand(name) { return this.commands.delete(name); }
+  removeMiddleware(middleware) { const index = this.middlewares.indexOf(middleware); return index < 0 ? false : (this.middlewares.splice(index, 1), true); }
+  command(name, handler, options = {}) {
+    const entry = { ...options, name, handler, aliases: options.aliases || [] };
+    this.commands.set(name, handler);
+    for (const alias of entry.aliases) this.commands.set(alias, handler);
+    this.commandMeta.set(name, entry);
+    for (const alias of entry.aliases) this.commandMeta.set(alias, entry);
+    return this;
+  }
+  removeCommand(name) {
+    const meta = this.commandMeta?.get(name);
+    if (meta) for (const alias of [meta.name, ...(meta.aliases || [])]) { this.commands.delete(alias); this.commandMeta.delete(alias); }
+    else this.commands.delete(name);
+    return Boolean(meta || !this.commands.has(name));
+  }
   component(pattern, handler) { this.components.push({ pattern, handler }); return this; }
+  removeComponent(pattern, handler) { const index = this.components.findIndex(item => item.pattern === pattern && item.handler === handler); return index < 0 ? false : (this.components.splice(index, 1), true); }
   modal(pattern, handler) { this.modals.push({ pattern, handler }); return this; }
+  removeModal(pattern, handler) { const index = this.modals.findIndex(item => item.pattern === pattern && item.handler === handler); return index < 0 ? false : (this.modals.splice(index, 1), true); }
   guard(pattern, handler) { return this.component(pattern, handler); }
   onAutocomplete(name, handler) { this.autocomplete.set(name, handler); return this; }
+  removeAutocomplete(name) { return this.autocomplete.delete(name); }
 
   async handle(data) {
     const context = new InteractionContext(this.client, data);
     try {
-      if (data.type === 2) await this._run(this.commands.get(data.data?.name), context, data.data?.name);
+      if (data.type === 2) {
+        const name = data.data?.name;
+        const meta = this.commandMeta.get(name);
+        if (meta?.args?.length) context.arguments = this.argumentParser.parseInteraction(context.options, meta.args);
+        await this._run(this.commands.get(name), context, name, meta);
+      }
       else if (data.type === 4) await this._run(this.autocomplete.get(data.data?.name), context, data.data?.name);
       else if (data.type === 3) await this._match(this.components, data.data?.custom_id, context);
       else if (data.type === 5) await this._match(this.modals, data.data?.custom_id, context);
       this.emit('interaction', context);
     } catch (error) {
       this.emit('error', error, context);
-      if (!context.acknowledged && !context.isAutocomplete) await context.reply({ content: 'Something went wrong while handling this interaction.', flags: 64 }).catch(() => {});
+      const failure = error instanceof PreconditionError
+        ? { content: error.message, ...(error.response || {}) }
+        : { content: 'Something went wrong while handling this interaction.', flags: 64 };
+      if (!context.acknowledged && !context.isAutocomplete) await context.reply(failure).catch(() => {});
       else if (!context.acknowledged) await context.autocomplete([]).catch(() => {});
     }
     return context;
   }
 
-  async _run(handler, context, name) {
+  async _run(handler, context, name, meta = {}) {
+    await assertPreconditions(meta.preconditions, this.client.preconditions, context);
     let index = -1;
     const dispatch = async current => {
       if (current <= index) throw new Error('next() called multiple times');
