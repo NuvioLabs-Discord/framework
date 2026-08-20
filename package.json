@@ -1,5 +1,5 @@
 {
-  "name": "nuvio-labs",
+  "name": "@nuviolabs-discord/framework",
   "version": "0.4.0",
   "description": "An advanced zero-dependency Discord framework for Node.js",
   "type": "module",
