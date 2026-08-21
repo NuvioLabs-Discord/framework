@@ -1,6 +1,6 @@
 # Nuvio Labs
 
-Nuvio Labs is a **zero-runtime-dependency Discord framework for Node.js**. Version `0.4.0` adds a Sapphire-style application layer on top of the resilient Gateway client, bucket-aware REST client, interaction router, fluent builders, plugins, bounded caches, observability helpers, and opt-in updates.
+Nuvio Labs is a **zero-runtime-dependency Discord framework for Node.js**. Version `0.4.1` adds a Sapphire-style application layer on top of the resilient Gateway client, bucket-aware REST client, interaction router, fluent builders, plugins, bounded caches, observability helpers, and opt-in updates.
 
 It uses only Node.js built-ins (`net`, `tls`, `https`, `crypto`, and filesystem/process APIs for the optional updater).
 
