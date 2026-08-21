@@ -4,13 +4,15 @@
   "description": "An advanced zero-dependency Discord framework for Node.js",
   "type": "module",
   "main": "src/index.js",
-  "exports": "./",
+  "exports": {
+    ".": "./src/index.js"
+  },
   "engines": {
     "node": ">=18"
   },
   "license": "Apache-2.0",
   "scripts": {
-    "check": "node --check src/index.js && node --input-type=module -e \"import('./src/index.js')\""
+    "check": "node --check src/index.js && node --input-type=module -e \"import('@nuviolabs-discord/framework')\""
   },
   "repository": {
     "type": "git",
