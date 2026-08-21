@@ -1,6 +1,6 @@
 # Nuvio Labs
 
-Nuvio Labs is a **zero-runtime-dependency Discord framework for Node.js**. Version `0.3.0` adds a Sapphire-style application layer on top of the resilient Gateway client, bucket-aware REST client, interaction router, fluent builders, plugins, bounded caches, observability helpers, and opt-in updates.
+Nuvio Labs is a **zero-runtime-dependency Discord framework for Node.js**. Version `0.4.0` adds a Sapphire-style application layer on top of the resilient Gateway client, bucket-aware REST client, interaction router, fluent builders, plugins, bounded caches, observability helpers, and opt-in updates.
 
 It uses only Node.js built-ins (`net`, `tls`, `https`, `crypto`, and filesystem/process APIs for the optional updater).
 
@@ -16,7 +16,7 @@ It uses only Node.js built-ins (`net`, `tls`, `https`, `crypto`, and filesystem/
 ## Install
 
 ```sh
-npm install nuvio-labs
+npm install @nuviolabs-discord/framework
 ```
 
 ## Quick start
@@ -27,7 +27,7 @@ import {
   Intents,
   command,
   embed,
-} from 'nuvio-labs';
+} from '@nuviolabs-discord/framework';
 
 const client = new Client({
   intents: Intents.Guilds,
@@ -122,7 +122,7 @@ Commands registered with aliases are only synchronized to Discord under their pr
 ### Argument parsing
 
 ```js
-import { parseArguments } from 'nuvio-labs';
+import { parseArguments } from '@nuviolabs-discord/framework';
 
 const args = parseArguments('production "cluster one" true', [
   { name: 'environment' },
@@ -202,7 +202,7 @@ await client.shutdown(); // also available as client.destroy()
 The built-in `Cache` is Map-compatible and supports LRU-style access ordering, TTL expiration, size limits, eviction hooks, async `getOrSet`, `sweep()`, and hit/miss statistics:
 
 ```js
-import { Cache } from 'nuvio-labs';
+import { Cache } from '@nuviolabs-discord/framework';
 
 const cache = new Cache({ maxSize: 500, ttl: 60_000 });
 const value = await cache.getOrSet('config', loadConfig);
